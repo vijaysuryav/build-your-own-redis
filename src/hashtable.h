@@ -45,7 +45,7 @@ inline HNode* h_detach(HTab* ht, HNode** from) {
     return node;
 }
 
-inline void h_resize(HTab* ht, size_t new_cap, bool (*eq)(HNode*, HNode*)) {
+inline void h_resize(HTab* ht, size_t new_cap) {
     HTab new_ht = {};
     h_init(&new_ht, new_cap);
 
@@ -62,3 +62,4 @@ inline void h_resize(HTab* ht, size_t new_cap, bool (*eq)(HNode*, HNode*)) {
     free(ht->tab);
     *ht = new_ht;
 }
+

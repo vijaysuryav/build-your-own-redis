@@ -13,8 +13,8 @@
 #include <ctime>  // for time()
 
 
-
-
+#include <map>
+std::unordered_map<std::string, std::map<std::string, double>> g_zsets;
 
 struct Entry {
     HNode node;
@@ -252,7 +252,33 @@ bool try_one_request(Conn* conn) {
             rescode = 0;
         }
 
-    } else {
+    }else if (parts.size() == 4 && parts[0] == "zadd") {
+    const std::string& key = parts[1];
+    double score = std::stod(parts[2]);
+    const std::string& member = parts[3];
+
+    g_zsets[key][member] = score;
+    response = "OK";
+    rescode = 0;
+    }else if (parts.size() == 3 && parts[0] == "zscore") {
+        const std::string& key = parts[1];
+        const std::string& member = parts[2];
+
+        auto key_it = g_zsets.find(key);
+        if (key_it != g_zsets.end()) {
+            auto member_it = key_it->second.find(member);
+            if (member_it != key_it->second.end()) {
+                response = std::to_string(member_it->second);
+                rescode = 0;
+            } else {
+                response = "(nil)";
+                rescode = 2;
+            }
+        } else {
+            response = "(nil)";
+            rescode = 2;
+        }
+    }else {
         std::cerr << "Unknown command: ";
         for (const auto& p : parts) std::cerr << "[" << p << "] ";
         std::cerr << std::endl;
