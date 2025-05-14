@@ -125,6 +125,9 @@ bool try_one_request(Conn* conn) {
         if (found) {
             ((Entry*)(*found))->val = parts[2];
         } else {
+                    if (g_table.size >= g_table.mask + 1) {
+            h_resize(&g_table, (g_table.mask + 1) * 2, entry_eq);
+        }
             Entry* ent = new Entry();
             ent->key = parts[1];
             ent->val = parts[2];

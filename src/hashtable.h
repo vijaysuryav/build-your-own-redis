@@ -44,3 +44,21 @@ inline HNode* h_detach(HTab* ht, HNode** from) {
     ht->size--;
     return node;
 }
+
+inline void h_resize(HTab* ht, size_t new_cap, bool (*eq)(HNode*, HNode*)) {
+    HTab new_ht = {};
+    h_init(&new_ht, new_cap);
+
+    for (size_t i = 0; i <= ht->mask; ++i) {
+        HNode* node = ht->tab[i];
+        while (node) {
+            HNode* next = node->next;
+            node->next = nullptr;
+            h_insert(&new_ht, node);
+            node = next;
+        }
+    }
+
+    free(ht->tab);
+    *ht = new_ht;
+}
