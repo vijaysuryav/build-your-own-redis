@@ -8,8 +8,28 @@
 #include <vector>
 #include <cassert>
 #include <map>
+#include "hashtable.h"
 
-std::map<std::string, std::string> g_map;
+struct Entry {
+    HNode node;
+    std::string key;
+    std::string val;
+};
+
+uint64_t str_hash(const char* data, size_t len) {
+    uint64_t h = 5381;
+    for (size_t i = 0; i < len; ++i)
+        h = ((h << 5) + h) ^ data[i];
+    return h;
+}
+
+bool entry_eq(HNode* a, HNode* b) {
+    Entry* ea = (Entry*)a;
+    Entry* eb = (Entry*)b;
+    return ea->key == eb->key;
+}
+
+HTab g_table;
 
 const size_t k_max_msg = 4096;
 
@@ -77,11 +97,12 @@ bool try_one_request(Conn* conn) {
 
     if (conn->rbuf_size < 4 + len) return false;
 
-    // Parse request into vector<string>
+    // Parse request
     std::vector<std::string> parts;
     uint32_t nstr = 0;
     memcpy(&nstr, conn->rbuf + 4, 4);
     size_t pos = 8;
+
     for (uint32_t i = 0; i < nstr; ++i) {
         if (pos + 4 > 4 + len) break;
         uint32_t slen = 0;
@@ -96,26 +117,59 @@ bool try_one_request(Conn* conn) {
     uint32_t rescode = 0;
 
     if (parts.size() == 3 && parts[0] == "set") {
-        g_map[parts[1]] = parts[2];
+        Entry key;
+        key.key = parts[1];
+        key.node.hcode = str_hash(key.key.data(), key.key.size());
+
+        HNode** found = h_lookup(&g_table, &key.node, entry_eq);
+        if (found) {
+            ((Entry*)(*found))->val = parts[2];
+        } else {
+            Entry* ent = new Entry();
+            ent->key = parts[1];
+            ent->val = parts[2];
+            ent->node.hcode = key.node.hcode;
+            h_insert(&g_table, &ent->node);
+        }
         response = "OK";
         rescode = 0;
+
     } else if (parts.size() == 2 && parts[0] == "get") {
-        auto it = g_map.find(parts[1]);
-        if (it != g_map.end()) {
-            response = it->second;
+        Entry key;
+        key.key = parts[1];
+        key.node.hcode = str_hash(key.key.data(), key.key.size());
+
+        HNode** found = h_lookup(&g_table, &key.node, entry_eq);
+        if (found) {
+            Entry* ent = (Entry*)(*found);
+            response = ent->val;
             rescode = 0;
         } else {
             response = "(nil)";
-            rescode = 2; // not found
+            rescode = 2;
         }
+
     } else if (parts.size() == 2 && parts[0] == "del") {
-        rescode = g_map.erase(parts[1]) ? 0 : 2;
-        response = "OK";
+        Entry key;
+        key.key = parts[1];
+        key.node.hcode = str_hash(key.key.data(), key.key.size());
+
+        HNode** found = h_lookup(&g_table, &key.node, entry_eq);
+        if (found) {
+            delete (Entry*)h_detach(&g_table, found);
+            response = "OK";
+            rescode = 0;
+        } else {
+            response = "(nil)";
+            rescode = 2;
+        }
+
     } else {
         response = "Unknown command";
         rescode = 1;
     }
 
+    // Write response
     uint32_t wlen = (uint32_t)response.size() + 4;
     memcpy(conn->wbuf, &wlen, 4);
     memcpy(conn->wbuf + 4, &rescode, 4);
@@ -130,6 +184,7 @@ bool try_one_request(Conn* conn) {
     conn->state = STATE_RES;
     return true;
 }
+
 
 
 bool try_fill_buffer(Conn* conn) {
@@ -194,7 +249,11 @@ void connection_io(Conn* conn) {
     }
 }
 
+
+
+
 int main() {
+    h_init(&g_table, 1024);  // power of 2
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) die("socket()");
     int val = 1;
