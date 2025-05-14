@@ -31,3 +31,14 @@ It closely follows the internals of Redis to demonstrate how a real-time key-val
 
 ```bash
 make
+
+🚀 How to Run
+Start the server in one terminal: ./server
+
+Then, in a separate terminal, run client commands:
+./client set foo bar
+./client get foo
+./client expire foo 5
+./client ttl foo
+sleep 5
+./client get foo     # (nil) — expired!
