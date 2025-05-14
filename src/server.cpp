@@ -9,6 +9,12 @@
 #include <cassert>
 #include <map>
 #include "hashtable.h"
+#include <unordered_map>
+#include <ctime>  // for time()
+
+
+
+
 
 struct Entry {
     HNode node;
@@ -30,6 +36,7 @@ bool entry_eq(HNode* a, HNode* b) {
 }
 
 HTab g_table;
+std::unordered_map<std::string, uint64_t> g_expire;
 
 const size_t k_max_msg = 4096;
 
@@ -48,7 +55,24 @@ struct Conn {
     size_t wbuf_sent = 0;
     uint8_t wbuf[4 + k_max_msg];
 };
+bool is_expired(const std::string& key) {
+    auto it = g_expire.find(key);
+    if (it == g_expire.end()) return false;
 
+    uint64_t now = time(nullptr);
+    if (now >= it->second) {
+        Entry temp;
+        temp.key = key;
+        temp.node.hcode = str_hash(key.data(), key.size());
+        HNode** found = h_lookup(&g_table, &temp.node, entry_eq);
+        if (found) {
+            delete (Entry*)h_detach(&g_table, found);
+        }
+        g_expire.erase(it);
+        return true;
+    }
+    return false;
+}
 void msg(const char* s) { std::cout << s << std::endl; }
 
 void die(const char* s) {
@@ -85,6 +109,8 @@ int32_t accept_new_conn(std::vector<Conn*>& fd2conn, int fd) {
     return 0;
 }
 
+
+
 bool try_one_request(Conn* conn) {
     if (conn->rbuf_size < 4) return false;
 
@@ -97,7 +123,6 @@ bool try_one_request(Conn* conn) {
 
     if (conn->rbuf_size < 4 + len) return false;
 
-    // Parse request
     std::vector<std::string> parts;
     uint32_t nstr = 0;
     memcpy(&nstr, conn->rbuf + 4, 4);
@@ -116,6 +141,10 @@ bool try_one_request(Conn* conn) {
     std::string response;
     uint32_t rescode = 0;
 
+    std::cout << "Parsed command: ";
+    for (const auto& p : parts) std::cout << "[" << p << "] ";
+    std::cout << std::endl;
+
     if (parts.size() == 3 && parts[0] == "set") {
         Entry key;
         key.key = parts[1];
@@ -125,9 +154,9 @@ bool try_one_request(Conn* conn) {
         if (found) {
             ((Entry*)(*found))->val = parts[2];
         } else {
-                    if (g_table.size >= g_table.mask + 1) {
-            h_resize(&g_table, (g_table.mask + 1) * 2, entry_eq);
-        }
+            if (g_table.size >= g_table.mask + 1) {
+                h_resize(&g_table, (g_table.mask + 1) * 2);
+            }
             Entry* ent = new Entry();
             ent->key = parts[1];
             ent->val = parts[2];
@@ -138,28 +167,68 @@ bool try_one_request(Conn* conn) {
         rescode = 0;
 
     } else if (parts.size() == 2 && parts[0] == "get") {
-        Entry key;
-        key.key = parts[1];
-        key.node.hcode = str_hash(key.key.data(), key.key.size());
-
-        HNode** found = h_lookup(&g_table, &key.node, entry_eq);
-        if (found) {
-            Entry* ent = (Entry*)(*found);
-            response = ent->val;
-            rescode = 0;
-        } else {
+        if (is_expired(parts[1])) {
             response = "(nil)";
             rescode = 2;
+        } else {
+            Entry key;
+            key.key = parts[1];
+            key.node.hcode = str_hash(key.key.data(), key.key.size());
+            HNode** found = h_lookup(&g_table, &key.node, entry_eq);
+            if (found) {
+                Entry* ent = (Entry*)(*found);
+                response = ent->val;
+                rescode = 0;
+            } else {
+                response = "(nil)";
+                rescode = 2;
+            }
         }
 
     } else if (parts.size() == 2 && parts[0] == "del") {
-        Entry key;
-        key.key = parts[1];
-        key.node.hcode = str_hash(key.key.data(), key.key.size());
+        if (is_expired(parts[1])) {
+            response = "(nil)";
+            rescode = 2;
+        } else {
+            Entry key;
+            key.key = parts[1];
+            key.node.hcode = str_hash(key.key.data(), key.key.size());
+            HNode** found = h_lookup(&g_table, &key.node, entry_eq);
+            if (found) {
+                delete (Entry*)h_detach(&g_table, found);
+                g_expire.erase(key.key);
+                response = "OK";
+                rescode = 0;
+            } else {
+                response = "(nil)";
+                rescode = 2;
+            }
+        }
 
-        HNode** found = h_lookup(&g_table, &key.node, entry_eq);
+    } else if (parts.size() == 1 && parts[0] == "keys") {
+        std::string result;
+        for (size_t i = 0; i <= g_table.mask; ++i) {
+            HNode* node = g_table.tab[i];
+            while (node) {
+                Entry* ent = (Entry*)node;
+                if (!is_expired(ent->key)) {
+                    result += ent->key + "\n";
+                }
+                node = node->next;
+            }
+        }
+        response = result.empty() ? "(empty)" : result;
+        rescode = 0;
+
+    } else if (parts.size() == 3 && parts[0] == "expire") {
+        const std::string& key = parts[1];
+        int seconds = std::stoi(parts[2]);
+        Entry temp;
+        temp.key = key;
+        temp.node.hcode = str_hash(key.data(), key.size());
+        HNode** found = h_lookup(&g_table, &temp.node, entry_eq);
         if (found) {
-            delete (Entry*)h_detach(&g_table, found);
+            g_expire[key] = time(nullptr) + seconds;
             response = "OK";
             rescode = 0;
         } else {
@@ -167,19 +236,39 @@ bool try_one_request(Conn* conn) {
             rescode = 2;
         }
 
+    } else if (parts.size() == 2 && parts[0] == "ttl") {
+        const std::string& key = parts[1];
+        if (is_expired(key)) {
+            response = "(nil)";
+            rescode = 2;
+        } else {
+            auto it = g_expire.find(key);
+            if (it == g_expire.end()) {
+                response = "-1";  // No TTL set
+            } else {
+                int64_t remaining = (int64_t)it->second - (int64_t)time(nullptr);
+                response = std::to_string(remaining > 0 ? remaining : 0);
+            }
+            rescode = 0;
+        }
+
     } else {
+        std::cerr << "Unknown command: ";
+        for (const auto& p : parts) std::cerr << "[" << p << "] ";
+        std::cerr << std::endl;
+
         response = "Unknown command";
         rescode = 1;
     }
 
-    // Write response
+    // Serialize response
     uint32_t wlen = (uint32_t)response.size() + 4;
     memcpy(conn->wbuf, &wlen, 4);
     memcpy(conn->wbuf + 4, &rescode, 4);
     memcpy(conn->wbuf + 8, response.data(), response.size());
     conn->wbuf_size = 4 + wlen;
 
-    // Shift buffer
+    // Consume request from read buffer
     size_t remain = conn->rbuf_size - 4 - len;
     if (remain) memmove(conn->rbuf, conn->rbuf + 4 + len, remain);
     conn->rbuf_size = remain;
@@ -187,6 +276,7 @@ bool try_one_request(Conn* conn) {
     conn->state = STATE_RES;
     return true;
 }
+
 
 
 
