@@ -7,6 +7,9 @@
 #include <iostream>
 #include <vector>
 #include <cassert>
+#include <map>
+
+std::map<std::string, std::string> g_map;
 
 const size_t k_max_msg = 4096;
 
@@ -64,28 +67,70 @@ int32_t accept_new_conn(std::vector<Conn*>& fd2conn, int fd) {
 
 bool try_one_request(Conn* conn) {
     if (conn->rbuf_size < 4) return false;
+
     uint32_t len = 0;
     memcpy(&len, conn->rbuf, 4);
     if (len > k_max_msg) {
         conn->state = STATE_END;
         return false;
     }
+
     if (conn->rbuf_size < 4 + len) return false;
 
-    printf("client says: %.*s\n", len, conn->rbuf + 4);
+    // Parse request into vector<string>
+    std::vector<std::string> parts;
+    uint32_t nstr = 0;
+    memcpy(&nstr, conn->rbuf + 4, 4);
+    size_t pos = 8;
+    for (uint32_t i = 0; i < nstr; ++i) {
+        if (pos + 4 > 4 + len) break;
+        uint32_t slen = 0;
+        memcpy(&slen, conn->rbuf + pos, 4);
+        pos += 4;
+        if (pos + slen > 4 + len) break;
+        parts.emplace_back((char*)conn->rbuf + pos, slen);
+        pos += slen;
+    }
 
-    memcpy(conn->wbuf, &len, 4);
-    memcpy(conn->wbuf + 4, conn->rbuf + 4, len);
-    conn->wbuf_size = 4 + len;
+    std::string response;
+    uint32_t rescode = 0;
 
+    if (parts.size() == 3 && parts[0] == "set") {
+        g_map[parts[1]] = parts[2];
+        response = "OK";
+        rescode = 0;
+    } else if (parts.size() == 2 && parts[0] == "get") {
+        auto it = g_map.find(parts[1]);
+        if (it != g_map.end()) {
+            response = it->second;
+            rescode = 0;
+        } else {
+            response = "(nil)";
+            rescode = 2; // not found
+        }
+    } else if (parts.size() == 2 && parts[0] == "del") {
+        rescode = g_map.erase(parts[1]) ? 0 : 2;
+        response = "OK";
+    } else {
+        response = "Unknown command";
+        rescode = 1;
+    }
+
+    uint32_t wlen = (uint32_t)response.size() + 4;
+    memcpy(conn->wbuf, &wlen, 4);
+    memcpy(conn->wbuf + 4, &rescode, 4);
+    memcpy(conn->wbuf + 8, response.data(), response.size());
+    conn->wbuf_size = 4 + wlen;
+
+    // Shift buffer
     size_t remain = conn->rbuf_size - 4 - len;
-    if (remain)
-        memmove(conn->rbuf, conn->rbuf + 4 + len, remain);
+    if (remain) memmove(conn->rbuf, conn->rbuf + 4 + len, remain);
     conn->rbuf_size = remain;
 
     conn->state = STATE_RES;
     return true;
 }
+
 
 bool try_fill_buffer(Conn* conn) {
     ssize_t rv = 0;
